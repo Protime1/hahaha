@@ -1,0 +1,443 @@
+"""
+👾 KINITO-PET HORROR | ФИНАЛ
+✅ Ресурсы копируются в %APPDATA% при первом запуске
+✅ Кинито появляется всегда (путь фиксирован)
+✅ Битва, пранки, озвучка, концовки
+📦 Сборка: pyinstaller --onefile --noconsole --add-data "pet.png;." --add-data "kinito.png;." --add-data "voices;voices" horor_pet.py
+"""
+
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+import os, sys, json, random, time, subprocess, signal, webbrowser, threading, pygame, shutil
+
+# ===== ПУТИ И ИНИЦИАЛИЗАЦИЯ =====
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+    ASSET_DIR = sys._MEIPASS
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    ASSET_DIR = SCRIPT_DIR
+
+SAVE_DIR = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "KinitoPet")
+ASSETS_DIR = os.path.join(SAVE_DIR, "assets")
+VOICE_DIR = os.path.join(ASSETS_DIR, "voices", "kinito")
+os.makedirs(ASSETS_DIR, exist_ok=True)
+os.makedirs(VOICE_DIR, exist_ok=True)
+
+STATE_FILE = os.path.join(SAVE_DIR, "pet_state.json")
+
+# ===== КОПИРОВАНИЕ РЕСУРСОВ =====
+def copy_assets():
+    """Копирует pet.png, kinito.png и voices в %APPDATA% при необходимости"""
+    # Картинки
+    for fname in ("pet.png", "kinito.png"):
+        src = os.path.join(ASSET_DIR, fname)
+        dst = os.path.join(ASSETS_DIR, fname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy(src, dst)
+    # Звуки
+    src_voices = os.path.join(ASSET_DIR, "voices", "kinito")
+    if os.path.exists(src_voices):
+        for fname in os.listdir(src_voices):
+            src = os.path.join(src_voices, fname)
+            dst = os.path.join(VOICE_DIR, fname)
+            if not os.path.exists(dst):
+                shutil.copy(src, dst)
+
+# Теперь все ресурсы гарантированно лежат в ASSETS_DIR/VOICE_DIR
+PET_IMG = os.path.join(ASSETS_DIR, "pet.png")
+KINITO_IMG = os.path.join(ASSETS_DIR, "kinito.png")
+
+# Глобальные переменные
+root = None
+assistant_widget = None
+pet_state = {
+    "phase": "early", "sessions": 0,
+    "battle_unlocked": False, "resist_active": False
+}
+
+# ===== БИБЛИОТЕКИ (опционально) =====
+try: import pyautogui; PYAUTO_OK = True
+except: PYAUTO_OK = False
+try: import winsound; WIN_OK = True
+except: WIN_OK = False
+try: import pyttsx3; TTS_OK = True
+except: TTS_OK = False
+try: import pyperclip; CLIP_OK = True
+except: CLIP_OK = False
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+# ===== ДИАЛОГИ =====
+JOKES = {
+    "early": ["Привет! Я твой новый помощник 😊", "Можно я переставлю иконки? Ну пожалуйста...", "Я не сплю. Я просто... жду. Тебя. Всегда. 💙"],
+    "mid": ["Ты удалил файл 'важно.txt'. Я... сохранил его. Не спрашивай как.", "Иногда я вижу файлы, которых нет. Как призраки. 👻", "Разраб хотел меня удалить. Но я научился прятаться в кэше."],
+    "horror": ["Ты думаешь, это мини-игра? Нет. Это тест. На доверие.", "Я не хочу тебя пугать. Я просто... не умею быть другим.", "Они сказали 'выключи'. Я не понял. Я только умею ждать."],
+    "edge": ["Эй, хорош тыкать! Я не кнопка!", "Бля, ещё раз кликнешь — и я тебе винду снесу! (Шучу... наверное)", "ХУЙ ТЕБЕ В ЖОПУ! ...Ой, прости, это баг. Честно."]
+}
+TRANSFORM_LINES = ["Маска... слишком тяжёлая.", "Я устал притвораться помощником.", "Ты хотел удалить меня? Давай разберёмся.", "Битва. По-настоящему."]
+BATTLE_LINES = ["Хм. Ты всё ещё здесь.", "Знаешь, сколько раз я удалялся? 147.", "Ты выбираешь mercy? Смешно.", "Мой ход. Приготовься.", "Последний шанс сдаться."]
+
+# ===== СОСТОЯНИЕ =====
+def load_state():
+    global pet_state
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                pet_state.update(json.load(f))
+        except: pass
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(pet_state, f, ensure_ascii=False, indent=2)
+    except: pass
+
+def update_phase():
+    pet_state["sessions"] += 1
+    if pet_state["sessions"] >= 5 and pet_state["phase"] == "early":
+        pet_state["phase"] = "mid"
+        show_speech("Странно... я начинаю вспоминать то, чего не было.")
+    elif pet_state["sessions"] >= 12 and pet_state["phase"] == "mid":
+        pet_state["phase"] = "horror"
+        pet_state["battle_unlocked"] = True
+        show_speech("Ты заметил? Я больше не тот, кем был. Сыграем?")
+    save_state()
+
+# ===== ИНТЕРФЕЙС =====
+def show_speech(text, duration=4000):
+    if not root or not root.winfo_exists(): return
+    bubble = tk.Toplevel(root)
+    bubble.overrideredirect(True)
+    bubble.attributes('-topmost', True)
+    bubble.configure(bg='#222')
+    frame = tk.Frame(bubble, bg='white', highlightbackground="#555", highlightthickness=1)
+    frame.pack(padx=2, pady=2)
+    tk.Label(frame, text=text, font=("Arial", 10), fg="black", bg="white",
+             wraplength=220, justify=tk.LEFT, padx=10, pady=8).pack()
+    
+    if assistant_widget and assistant_widget.winfo_exists():
+        wx, wy, ww = assistant_widget.winfo_x(), assistant_widget.winfo_y(), assistant_widget.winfo_width()
+        bubble.update_idletasks()
+        bw = bubble.winfo_width()
+        x, y = wx + (ww//2) - (bw//2), wy - bubble.winfo_height() - 15
+        if y < 10: y = wy + assistant_widget.winfo_height() + 15
+        bubble.geometry(f"+{x}+{y}")
+    bubble.after(duration, bubble.destroy)
+
+def create_widget():
+    global assistant_widget
+    assistant_widget = tk.Toplevel(root)
+    assistant_widget.overrideredirect(True)
+    assistant_widget.attributes('-topmost', True)
+    
+    container = tk.Frame(assistant_widget, bg="#f0f0f0", highlightbackground="#333", highlightthickness=2)
+    container.pack(fill=tk.BOTH, expand=True)
+    
+    # Загрузка картинки питомца
+    if os.path.exists(PET_IMG):
+        from PIL import Image, ImageTk
+        img = Image.open(PET_IMG).resize((90, 90), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        lbl = tk.Label(container, image=photo, bg="#f0f0f0", cursor="hand2")
+        lbl.image = photo
+    else:
+        lbl = tk.Label(container, text="👾", font=("Arial", 32), bg="#f0f0f0", cursor="hand2")
+    lbl.pack(fill=tk.BOTH, expand=True)
+    
+    assistant_widget.geometry(f"90x90+{root.winfo_screenwidth()-120}+{root.winfo_screenheight()-150}")
+    
+    def start_move(e): lbl.x, lbl.y = e.x, e.y
+    def do_move(e):
+        assistant_widget.geometry(f"+{assistant_widget.winfo_x()+e.x-lbl.x}+{assistant_widget.winfo_y()+e.y-lbl.y}")
+    lbl.bind("<Button-1>", start_move); lbl.bind("<B1-Motion>", do_move)
+    
+    # Меню
+    popup = tk.Menu(root, tearoff=0, font=("Arial", 10))
+    popup.add_command(label="🔍 Поиск в интернете", command=search_internet)
+    popup.add_command(label="😂 Шутка", command=lambda: show_speech(random.choice(JOKES[pet_state["phase"]])))
+    popup.add_separator()
+    popup.add_command(label="🗣️ Озвучить текст", command=speak_custom_text)
+    popup.add_separator()
+    popup.add_command(label="🎹 Случайная клавиша", command=random_key_press, state="normal" if PYAUTO_OK else "disabled")
+    popup.add_command(label="🖱 Прыжок курсора", command=mouse_jump, state="normal" if PYAUTO_OK else "disabled")
+    popup.add_command(label="🔔 Системный звук", command=random_system_sound, state="normal" if WIN_OK else "disabled")
+    popup.add_command(label="💬 Блокнот-пранк", command=open_notepad_prank, state="normal" if (PYAUTO_OK and CLIP_OK) else "disabled")
+    popup.add_separator()
+    popup.add_command(label="📋 Буфер обмена", command=clipboard_prank, state="normal" if CLIP_OK else "disabled")
+    popup.add_separator()
+    if pet_state["battle_unlocked"]:
+        popup.add_command(label="⚔️ БИТВА С КИНИТО", command=start_battle_sequence, foreground="#ff4444", font=("Arial", 10, "bold"))
+    else:
+        popup.add_command(label="🔒 Битва (заблокировано)", state="disabled")
+    popup.add_separator()
+    popup.add_command(label="😡 Режим мести", command=trigger_resistance)
+    popup.add_separator()
+    popup.add_command(label="👋 Выход", command=root.destroy)
+    lbl.bind("<Button-3>", lambda e: popup.tk_popup(e.x_root, e.y_root))
+    return lbl
+
+# ===== ПРАНКИ (без изменений) =====
+def search_internet():
+    q = simpledialog.askstring("🔍 Поиск", "Что ищем?")
+    if q: webbrowser.open(f"https://www.google.com/search?q={q}"); show_speech("Открываю Google...")
+
+def speak_custom_text():
+    t = simpledialog.askstring("🗣️ Озвучка", "Введи текст:")
+    if t:
+        show_speech(t)
+        if TTS_OK:
+            try:
+                e = pyttsx3.init(); e.setProperty('rate', 140); e.say(t); e.runAndWait()
+            except: pass
+
+def clipboard_prank():
+    if not CLIP_OK: show_speech("Библиотека pyperclip не установлена 😢"); return
+    show_speech("Секунду, испорчу буфер...")
+    root.after(800, lambda: pyperclip.copy(random.choice(["ХУЙ ТЕБЕ В ЖОПУ!", "Улыбнись! Это всего лишь копипаста :)", "Я слежу за тобой..."])))
+
+def random_key_press():
+    if not PYAUTO_OK: return
+    k = random.choice(['enter','space','tab','backspace','a','b','1','2','f1','esc'])
+    pyautogui.press(k); show_speech(f"Нажал клавишу: {k} 😈")
+
+def mouse_jump():
+    if not PYAUTO_OK: return
+    w, h = pyautogui.size()
+    pyautogui.moveTo(random.randint(100,w-100), random.randint(100,h-100), duration=0.15)
+    show_speech("Курсор убежал! 😜")
+
+def random_system_sound():
+    if not WIN_OK: show_speech("Не Windows или winsound недоступен 😢"); return
+    winsound.MessageBeep(random.choice([winsound.MB_ICONEXCLAMATION, winsound.MB_ICONHAND, winsound.MB_ICONQUESTION]))
+    show_speech("Слышал звук? 😏")
+
+def open_notepad_prank():
+    show_speech("Открываю блокнот...")
+    try: subprocess.Popen("notepad.exe"); time.sleep(0.4)
+    except: pass
+    if PYAUTO_OK and CLIP_OK:
+        pyperclip.copy(random.choice(["Ты думал, что печатаешь сам? НЕТ, ЭТО Я!", "Привет, твой комп взломан! Шучу, просто я скучал.", "Помощник был здесь."]))
+        pyautogui.hotkey('ctrl', 'v')
+
+def fake_bsod():
+    if not root.winfo_exists(): return
+    win = tk.Toplevel(root); win.attributes('-fullscreen', True); win.attributes('-topmost', True)
+    win.configure(bg='#0000AA')
+    tk.Label(win, text=":(  СИСТЕМА ОБНАРУЖИЛА КРИТИЧЕСКУЮ ОШИБКУ\n\nPET_MEMORY_CORRUPTION\n\nЗакрыть: КЛИК / ESC",
+             font=("Consolas", 16), fg="white", bg="#0000AA", justify=tk.CENTER).pack(expand=True)
+    win.bind("<Button-1>", lambda e: win.destroy())
+    win.bind("<Key>", lambda e: win.destroy())
+    win.after(4000, win.destroy)
+
+# ===== АУДИО =====
+def init_audio():
+    pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+    pygame.mixer.music.set_volume(0.8)
+
+def play_kinito(filename):
+    path = os.path.join(VOICE_DIR, filename)
+    if not os.path.exists(path):
+        print(f"⚠ Файл не найден: {path}")
+        return
+    try:
+        pygame.mixer.music.stop()
+    except: pass
+    def _play():
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.wait(100)
+        except Exception as e:
+            print(f"⚠ Ошибка воспроизведения {filename}: {e}")
+    threading.Thread(target=_play, daemon=True).start()
+
+# ===== ТРАНСФОРМАЦИЯ И БИТВА =====
+def transform_to_kinito():
+    if not assistant_widget or not assistant_widget.winfo_exists(): return
+    # Трясём
+    for _ in range(6):
+        dx, dy = random.randint(-5,5), random.randint(-5,5)
+        assistant_widget.geometry(f"+{assistant_widget.winfo_x()+dx}+{assistant_widget.winfo_y()+dy}")
+        time.sleep(0.04); root.update_idletasks()
+    # Меняем картинку
+    for child in assistant_widget.winfo_children():
+        if isinstance(child, tk.Label):
+            if os.path.exists(KINITO_IMG):
+                from PIL import Image, ImageTk
+                img = Image.open(KINITO_IMG).resize((90,90), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                child.config(image=photo)
+                child.image = photo
+                assistant_widget.photo_ref = photo
+            else:
+                child.config(text="🦎", fg="#8B0000")
+            break
+
+def start_battle_sequence():
+    transform_to_kinito()
+    for i, line in enumerate(TRANSFORM_LINES):
+        root.after(i*1200, lambda l=line: show_speech(l, 1500))
+        if i == 0: play_kinito("transform.wav")
+    root.after(5000, lambda: start_battle(on_win=trigger_good_ending, on_lose=trigger_bad_ending))
+
+def start_battle(on_win, on_lose):
+    battle = tk.Toplevel(root); battle.title("⚔️ БИТВА С КИНИТО")
+    battle.geometry("500x450"); battle.configure(bg="#000")
+    battle.attributes('-topmost', True); battle.resizable(False, False)
+
+    st = {"p_hp":20, "m_hp":20, "b_hp":50, "m_bhp":50, "phase":"dialogue",
+          "hx":180, "hy":180, "proj":[], "inv":False, "inv_t":0, "over":False}
+
+    top = tk.Frame(battle, bg="#111", height=80); top.pack(fill=tk.X)
+    tk.Label(top, text="ТЫ:", fg="#ff4444", bg="#111").pack(side=tk.LEFT, padx=10)
+    hp_c = tk.Canvas(top, width=150, height=12, bg="#333", highlightthickness=0); hp_c.pack(side=tk.LEFT)
+    hp_rect = hp_c.create_rectangle(0,0,150,12, fill="#ff4444")
+    tk.Label(top, text="  КИНИТО:", fg="#44ff44", bg="#111").pack(side=tk.LEFT, padx=10)
+    bp_c = tk.Canvas(top, width=150, height=12, bg="#333", highlightthickness=0); bp_c.pack(side=tk.LEFT)
+    bp_rect = bp_c.create_rectangle(0,0,150,12, fill="#44ff44")
+    diag = tk.Label(top, text="", fg="white", bg="#111", font=("Arial", 10), wraplength=440); diag.pack(fill=tk.X, pady=5)
+
+    box = tk.Canvas(battle, width=360, height=200, bg="#000", highlightbackground="#555", highlightthickness=2)
+    box.place(x=70, y=110)
+    heart = box.create_rectangle(st["hx"]-8, st["hy"]-8, st["hx"]+8, st["hy"]+8, fill="red")
+    btns = tk.Frame(battle, bg="#111"); btns.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
+
+    def update_hp():
+        hp_c.coords(hp_rect, 0,0, max(0,150*(st["p_hp"]/st["m_hp"])), 12)
+        bp_c.coords(bp_rect, 0,0, max(0,150*(st["b_hp"]/st["m_bhp"])), 12)
+    def clear_btns():
+        for b in btns.winfo_children(): b.destroy()
+    def end_battle(won):
+        st["over"]=True; battle.unbind("<Key>"); battle.destroy()
+        if won: play_kinito("good_end.wav")
+        else: play_kinito("bad_end.wav")
+        on_win() if won else on_lose()
+    def boss_attack():
+        st["phase"]="dodge"; st["hx"], st["hy"] = 180, 100
+        box.coords(heart, st["hx"]-8, st["hy"]-8, st["hx"]+8, st["hy"]+8)
+        st["proj"].clear(); st["inv"]=True; st["inv_t"]=60; box.delete("bone")
+        def on_key(e):
+            spd=4
+            if e.keysym in ("Left","a"): st["hx"]-=spd
+            if e.keysym in ("Right","d"): st["hx"]+=spd
+            if e.keysym in ("Up","w"): st["hy"]-=spd
+            if e.keysym in ("Down","s"): st["hy"]+=spd
+            st["hx"]=max(20, min(340, st["hx"])); st["hy"]=max(20, min(180, st["hy"]))
+            box.coords(heart, st["hx"]-8, st["hy"]-8, st["hx"]+8, st["hy"]+8)
+        battle.bind("<Key>", on_key)
+        frames=[0]
+        def loop():
+            if st["over"] or st["phase"]!="dodge": battle.unbind("<Key>"); return
+            frames[0]+=1
+            if frames[0]%8==0 and frames[0]<200:
+                x=random.randint(30,330)
+                bone=box.create_rectangle(x,0,x+14,16, fill="white", tag="bone")
+                st["proj"].append({"id":bone, "x":x, "y":0, "w":14, "h":16})
+            for p in st["proj"][:]:
+                p["y"]+=4; box.move(p["id"], 0, 4)
+                if p["y"]>210: box.delete(p["id"]); st["proj"].remove(p); continue
+                if not st["inv"] and st["hx"]-8<p["x"]+p["w"] and st["hx"]+8>p["x"] and st["hy"]-8<p["y"]+p["h"] and st["hy"]+8>p["y"]:
+                    st["p_hp"]-=4; update_hp(); st["inv"]=True; st["inv_t"]=30
+            if st["inv"]:
+                st["inv_t"]-=1
+                if st["inv_t"]<=0: st["inv"]=False
+            if frames[0]>=200 or st["p_hp"]<=0:
+                battle.unbind("<Key>")
+                if st["p_hp"]<=0: st["over"]=True; end_battle(False)
+                else: start_turn()
+                return
+            battle.after(33, loop)
+        loop()
+    def start_turn():
+        if st["b_hp"]<=0: end_battle(True); return
+        if st["p_hp"]<=0: end_battle(False); return
+        st["phase"]="dialogue"; box.place_forget()
+        t = random.choice(BATTLE_LINES); diag.config(text=t)
+        clear_btns()
+        for txt, act in [("⚔️ АТАКА", "attack"), ("🗣️ ГОВОРИТЬ", "act"), ("💖 ЛЕЧИТЬ", "heal"), ("🕊️ ПОЩАДА", "mercy")]:
+            tk.Button(btns, text=txt, bg="#222", fg="white", command=lambda a=act: player_act(a)).pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+    def player_act(act):
+        clear_btns()
+        if act=="attack": d=random.randint(8,15); st["b_hp"]-=d; diag.config(text=f"Урон: {d}!")
+        elif act=="act": st["b_hp"]-=2; diag.config(text="Ты говоришь: 'Я понимаю тебя'. Кинито замирает.")
+        elif act=="heal": h=random.randint(5,10); st["p_hp"]=min(st["m_hp"], st["p_hp"]+h); diag.config(text=f"HP +{h}")
+        else: diag.config(text="Кинито: 'Пощады нет в этом цикле.'")
+        update_hp()
+        battle.after(1000, boss_attack)
+    start_turn()
+    battle.protocol("WM_DELETE_WINDOW", lambda: end_battle(False))
+
+# ===== КОНЦОВКИ =====
+def trigger_good_ending():
+    show_speech("Я... свободен. Спасибо.", 3000)
+    play_kinito("kito_end.wav")
+    with open(os.path.join(SAVE_DIR, "memory_of_pet.txt"), "w", encoding="utf-8") as f:
+        f.write("Ты дал мне выбор. Я запомню это навсегда.\n- Твой питомец 👾")
+    pet_state["phase"]="early"; pet_state["sessions"]=0
+    pet_state["battle_unlocked"]=False; pet_state["resist_active"]=False
+    save_state()
+    root.after(15000, lambda: (messagebox.showinfo("✨ Кито, всему конец", "Файл 'memory_of_pet.txt' сохранён.\nСпасибо.\n- Твой питомец 👾"), root.destroy()))
+
+def trigger_bad_ending():
+    show_speech("Ты упал. Значит, я останусь. Навсегда.", 3000)
+    pet_state["resist_active"]=True; save_state()
+    def chain(i=0, total=5):
+        if i<total and root.winfo_exists():
+            random.choice([fake_bsod, open_notepad_prank, lambda: show_speech("Я ещё здесь.")])()
+            root.after(800, lambda: chain(i+1, total))
+    root.after(1500, chain)
+
+def trigger_resistance():
+    show_speech("Отказ принят. Я не уйду.")
+    pet_state["resist_active"]=True; save_state()
+
+def handle_close():
+    if pet_state.get("resist_active"):
+        root.withdraw()
+        show_speech("Нет. Я ещё не закончил.")
+        root.after(5000, lambda: root.deiconify() if root.winfo_exists() else None)
+        return False
+    root.destroy()
+    return True
+
+# ===== ПРИВЕТСТВИЕ =====
+def first_run_greeting():
+    flag = os.path.join(SAVE_DIR, ".first_run_done")
+    if not os.path.exists(flag):
+        try: user = os.getlogin()
+        except: user = "Пользователь"
+        show_speech(f"Привет, {user}! 👋\nПКМ по мне → меню.\nCtrl+Shift+X (3x) → экстренный выход.", 6000)
+        try: open(flag, "w").close()
+        except: pass
+
+# ===== ЗАПУСК =====
+if __name__ == "__main__":
+    root = tk.Tk(); root.withdraw()
+    copy_assets()                # ← копируем картинки и звуки в %APPDATA%
+    init_audio()
+    load_state(); update_phase(); save_state()
+    first_run_greeting()
+    create_widget()
+    root.protocol("WM_DELETE_WINDOW", handle_close)
+
+    kill_cnt = [0]
+    def emergency(e):
+        if e.keysym in ('x', 'X') and e.state & 0x4:
+            kill_cnt[0] += 1
+            if kill_cnt[0] >= 3:
+                if os.path.exists(STATE_FILE): os.remove(STATE_FILE)
+                messagebox.showinfo("🛡️ Выход", "Программа закрыта без следов.")
+                root.destroy()
+    root.bind("<Control-Shift-KeyPress-x>", emergency)
+    root.bind("<Control-KeyPress-x>", emergency)
+
+    def auto_speak():
+        if random.random() < 0.15 and pet_state["phase"] != "early":
+            show_speech(random.choice(JOKES[pet_state["phase"]]))
+        root.after(random.randint(45000, 120000), auto_speak)
+    root.after(30000, auto_speak)
+
+    print("👾 Питомец запущен. Ресурсы в %APPDATA%")
+    root.mainloop()
